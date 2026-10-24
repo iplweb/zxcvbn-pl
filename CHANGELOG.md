@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-10-24
 
 - Inflected forms of names: `pl_first_names`, `pl_last_names` and
   `pl_places` now also hold all cases, singular and plural, of their names
