@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-10-24
 
 - New `pl_places` dictionary: Polish place names from the official list of
   place names (Wykaz urzędowych nazw miejscowości i ich części, MSWiA, state
