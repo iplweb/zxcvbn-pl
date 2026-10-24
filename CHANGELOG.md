@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+- Inflected forms of names: `pl_first_names`, `pl_last_names` and
+  `pl_places` now also hold all cases, singular and plural, of their names
+  (`wrocławiu`, `krakowa`, `katarzyno`, `kowalskiego`), with diacritics-free
+  variants, from SGJP — the grammatical dictionary of Polish (edition
+  2026.06.29, BSD-2-Clause, see `NOTICE.md` and `LICENSE.sgjp`). Multi-word
+  place names are declined word by word and glued (`zielonejgórze`,
+  `nowymsączu`, `bielskubiałej`). Forms stay in the dictionary of their base
+  form, so `dictionary_name` does not change. Passwords such as
+  `Wrocławiu2025` (3 -> 1), `Gdańsku12345678` (3 -> 1) or `Krakowie2024!!!`
+  (4 -> 3) now get a lower score.
+- An inflected form gets twice the rank of its base form; entries that were
+  already in a dictionary keep their rank (base forms do not change). Forms
+  that are also frequent ordinary words (`górze`, `kota`) are left to
+  `pl_common_words`.
+- The wheel grows from ~1.0 MB to ~3.2 MB (`pl_places.marisa` ~2.4 MB).
+- `scripts/build_dictionaries.py`: checksum-verified download of SGJP;
+  no new runtime or build dependencies.
+
 ## 0.2.0 — 2026-10-24
 
 - New `pl_places` dictionary: Polish place names from the official list of

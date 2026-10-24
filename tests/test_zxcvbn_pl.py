@@ -150,3 +150,123 @@ def test_miasto_z_dopiskiem_obniza_ocene(haslo):
 )
 def test_fraza_z_nazwa_miejscowosci_nadal_mocna(zarejestrowane, haslo):
     assert zxcvbn(haslo)["score"] == 4
+
+
+@pytest.mark.parametrize(
+    "nazwa,slowo",
+    [
+        # Miejscownik, dopełniacz, narzędnik, liczba mnoga miast (SGJP).
+        ("pl_places", "wrocławiu"),
+        ("pl_places", "wroclawiu"),
+        ("pl_places", "krakowa"),
+        ("pl_places", "krakowie"),
+        ("pl_places", "gdańsku"),
+        ("pl_places", "gdansku"),
+        ("pl_places", "warszawie"),
+        ("pl_places", "poznaniem"),
+        ("pl_places", "tychach"),
+        # Nazwy wieloczłonowe: oba człony w tym samym przypadku, sklejone.
+        ("pl_places", "zielonejgórze"),
+        ("pl_places", "zielonejgorze"),
+        ("pl_places", "nowymsączu"),
+        ("pl_places", "bielskubiałej"),
+        ("pl_places", "tarnowskichgórach"),
+        ("pl_places", "dusznikachzdroju"),
+        ("pl_places", "nowymmieścienadpilicą"),
+        # Wołacz i inne przypadki imion.
+        ("pl_first_names", "katarzyno"),
+        ("pl_first_names", "agnieszko"),
+        ("pl_first_names", "tomaszu"),
+        # Nazwiska (przymiotnikowe i rzeczownikowe).
+        ("pl_last_names", "kowalskiego"),
+        ("pl_last_names", "kowalskiej"),
+        ("pl_last_names", "kowalskich"),
+        ("pl_last_names", "nowakowi"),
+    ],
+)
+def test_forma_odmieniona_w_slowniku(nazwa, slowo):
+    assert slowo in zxcvbn_pl.dictionaries()[nazwa]
+
+
+@pytest.mark.parametrize(
+    "nazwa,podstawowa,odmieniona",
+    [
+        ("pl_places", "wrocław", "wrocławiu"),
+        ("pl_places", "kraków", "krakowa"),
+        ("pl_places", "zielonagóra", "zielonejgórze"),
+        ("pl_first_names", "katarzyna", "katarzyno"),
+        ("pl_last_names", "kowalski", "kowalskiego"),
+    ],
+)
+def test_forma_odmieniona_ma_dwukrotna_pozycje_podstawowej(
+    nazwa, podstawowa, odmieniona
+):
+    slownik = zxcvbn_pl.dictionaries()[nazwa]
+    assert slownik[odmieniona] == 2 * slownik[podstawowa]
+
+
+def test_odmiana_bez_polskich_znakow_ma_te_sama_pozycje():
+    slownik = zxcvbn_pl.dictionaries()["pl_places"]
+    assert slownik["wroclawiu"] == slownik["wrocławiu"]
+    assert slownik["zielonejgorze"] == slownik["zielonejgórze"]
+
+
+def test_forma_podstawowa_zachowuje_pozycje():
+    # Odmiany innych nazw nie nadpisują wpisów, które już są w słowniku.
+    assert zxcvbn_pl.dictionaries()["pl_places"]["warszawa"] == 1
+    assert zxcvbn_pl.dictionaries()["pl_last_names"]["nowak"] == 1
+
+
+@pytest.mark.parametrize(
+    "nazwa,slowo",
+    [
+        # Częste zwykłe słowa zostają w pl_common_words, nie dostają pozycji
+        # miasta Góra, miejscowości Dobra ani nazwiska Kot.
+        ("pl_places", "górze"),
+        ("pl_places", "dobrej"),
+        ("pl_last_names", "kota"),
+        ("pl_first_names", "nadzieję"),
+    ],
+)
+def test_czeste_zwykle_slowa_nie_dostaja_pozycji_nazwy(nazwa, slowo):
+    assert slowo not in zxcvbn_pl.dictionaries()[nazwa]
+    assert slowo in zxcvbn_pl.dictionaries()["pl_common_words"]
+
+
+@pytest.mark.parametrize(
+    "haslo,slownik",
+    [
+        ("Wroclawiu2025!!", "pl_places"),
+        ("Krakowie2024!!!", "pl_places"),
+        ("Gdańsku12345678", "pl_places"),
+        ("ZielonejGorze2020", "pl_places"),
+        ("Katarzyno1985!", "pl_first_names"),
+        ("Kowalskiego1990", "pl_last_names"),
+    ],
+)
+def test_forma_odmieniona_obniza_ocene(haslo, slownik):
+    przed = zxcvbn(haslo)["score"]
+    with slowniki_zarejestrowane():
+        wynik = zxcvbn(haslo)
+    assert wynik["score"] < przed
+    assert wynik["score"] <= 3
+    # Odmiana jest w tym samym słowniku co forma podstawowa.
+    assert slownik in [m.get("dictionary_name") for m in wynik["sequence"]]
+
+
+@pytest.mark.parametrize(
+    "haslo",
+    [
+        "wrzos-kaktus-lipa-7",
+        "dluga-fraza-hasla-testowego",
+        "ala ma kota i psa",
+        "ŻółtaŁódźPłyniePoWiśle",
+        "mostek-zebra-1987-pliszka",
+        "kot1-pies2-kot3-mysz4",
+        "ptaszek-na-drzewie-gra",
+        "zielonaherbatazcytryna",
+        "przykladowska-zofia-zielony-rower",
+    ],
+)
+def test_frazy_nadal_mocne(zarejestrowane, haslo):
+    assert zxcvbn(haslo)["score"] >= 3

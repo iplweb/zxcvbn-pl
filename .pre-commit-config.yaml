@@ -13,5 +13,7 @@ repos:
       - id: check-merge-conflict
       - id: check-yaml
       - id: detect-private-key
+      # pl_places.marisa ma ok. 2,4 MB od 0.3.0 (formy odmienione z SGJP);
+      # limit chroni przed przypadkowym dodaniem dużych plików innego typu.
       - id: check-added-large-files
-        args: [--maxkb=1024]
+        args: [--maxkb=4096]

@@ -15,6 +15,12 @@ checksum-verified (see ``build_places`` for the ranking):
 * the population of every town as of 31 Dec 2025 (GUS, Bank Danych Lokalnych,
   CC BY 4.0) — used to order the towns.
 
+First names, last names and place names are then extended with their
+inflected forms (cases, plural: ``wrocławiu``, ``kowalskiego``,
+``zielonejgórze``) taken from SGJP, the grammatical dictionary of Polish
+(BSD-2-Clause, pinned and checksum-verified; see ``Inflector`` and
+``add_inflections``).
+
 For every word with Polish diacritics a variant without them is added with
 the same rank (``żółw`` -> ``zolw``) — that is how such words are usually
 typed in passwords.
@@ -23,7 +29,7 @@ Run from the repository root (needs only the runtime dependency)::
 
     uv run python scripts/build_dictionaries.py [--cache-dir DIR]
 
-It downloads ~7 MB and makes ~40 requests to the GUS BDL API, which limits
+It downloads ~50 MB and makes ~40 requests to the GUS BDL API, which limits
 anonymous clients (HTTP 429 is retried); ``--cache-dir`` avoids re-downloading
 on repeated builds.
 
@@ -33,8 +39,10 @@ The output is deterministic: the same upstream data gives byte-identical
 
 import argparse
 import base64
+import gzip
 import hashlib
 import io
+import itertools
 import json
 import re
 import tarfile
@@ -44,7 +52,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import marisa_trie
@@ -93,6 +101,54 @@ POPULATION_SHA256 = "7b51b7794f2a41aa9baf09cfd65b05556268d87242a3b62cee15b44fc15
 # The last digit of a BDL gmina-level unit id is its kind: 1 = urban gmina,
 # 4 = the town of an urban-rural gmina. Together they are all Polish towns.
 TOWN_UNIT_KINDS = ("1", "4")
+
+# SGJP — Słownik gramatyczny języka polskiego (Woliński, Bronk, Gruszczyński,
+# Kieraś, Saloni, Skowrońska, Wołosz; BSD-2-Clause), the "tab" export used by
+# Morfeusz 2: one ``form<TAB>lemma<TAB>tag<TAB>qualifiers<TAB>...`` line per
+# inflected form. https://morfeusz.sgjp.pl/download/ — the same edition that
+# polish-inflection-data 2026.6.28 is built from.
+SGJP_VERSION = "20260628"
+SGJP_DICT_ID = "pl.sgjp.sgjp-2026.06.29"
+SGJP_URL = (
+    f"https://download.sgjp.pl/morfeusz/{SGJP_VERSION}/sgjp-{SGJP_VERSION}.tab.gz"
+)
+SGJP_SHA256 = "84b9b98148f73ecee8fadde2bb827e9711c364f59cc1b56efe99fe81c9db8a3b"
+
+# SGJP qualifiers (4th column) of the lexemes whose forms extend a dictionary.
+# Only proper names are used, so ``Wrocław`` gets ``wrocławiu`` but a village
+# called ``Las`` does not get the forms of the common noun ``las``.
+INFLECTED_CATEGORIES = {
+    "pl_first_names": frozenset({"imię"}),
+    "pl_last_names": frozenset(
+        {"nazwisko", "nazwisko_(odmężowskie)", "nazwisko_(odojcowskie)"}
+    ),
+    "pl_places": frozenset({"nazwa_geograficzna", "człon_nazwy_geograficznej"}),
+}
+# Qualifiers of ordinary vocabulary (adjectives and verbs have none).
+COMMON_CATEGORIES = frozenset({"", "nazwa_pospolita"})
+# Inflected forms that are also among this many most frequent common words
+# (and forms of a common word in SGJP) are left to ``pl_common_words``:
+# ``górze`` (997th), ``kota`` (3400th), ``mają`` (233rd) are everyday words.
+# SGJP lists many rare common homographs (``warszawa`` the car, ``paweł`` a
+# rose, ``marto`` from ``mrzeć``), so a rarer form (``warszawie``, 38069th;
+# ``poznaniu``, 47529th) is taken to be mostly the name itself.
+COMMON_WORD_RANK_LIMIT = 10000
+
+# An inflected form gets the rank of its base form times this factor (zxcvbn
+# reads the rank as "guesses needed"). A name has ~10-14 forms, but they are
+# far from equally likely — the locative and genitive (``we Wrocławiu``,
+# ``z Krakowa``) dominate — so the full form count would overrate the typical
+# password; 2 says "a bit less likely than the base form". Measured on ~6800
+# passwords built from the forms of the top 100 towns, first and last names
+# (``Wrocławiu2024!``, ``krakowa1990``): factors 1 and 2 give the same score
+# distribution, 4 moves ~3 % of them from 2 to 3, the form count (14) ~24 %.
+INFLECTED_RANK_FACTOR = 2
+
+SGJP_CASES = ("nom", "gen", "dat", "acc", "inst", "loc", "voc")
+SGJP_NUMBERS = ("sg", "pl")
+# Parts of speech that decline like adjectives; their last tag field is the
+# degree (adj) or negation (participles), only the plain one is used.
+SGJP_ADJECTIVES = {"adj": "pos", "pact": "aff", "ppas": "aff"}
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "src" / "zxcvbn_pl" / "data"
 
@@ -155,11 +211,15 @@ def read_lists(payload):
 
 
 def build_ranks(upstream_lists):
+    """Return ``(ranks, sources)``: the dictionary and its ``(word, rank)``."""
     ranks = {}
+    sources = []
     for words in upstream_lists:
         for position, word in enumerate(words, start=1):
-            add_word(ranks, word.strip().lower(), position)
-    return ranks
+            word = word.strip().lower()
+            add_word(ranks, word, position)
+            sources.append((word, position))
+    return ranks, sources
 
 
 def add_word(ranks, word, rank):
@@ -171,13 +231,15 @@ def add_word(ranks, word, rank):
             ranks[variant] = rank
 
 
-def split_place_name(name):
-    """``"Bielsko-Biała"`` -> ``["bielsko", "biała"]``.
+def strip_place_suffix(name):
+    """Drop the disambiguating ``k. <other place>`` ("near ...") suffix that a
+    few names in the official list carry: ``"Brzezie k. Sulechowa"``."""
+    return re.sub(r"\s+k\.\s.*$", "", name.strip())
 
-    Drops the disambiguating ``k. <other place>`` ("near ...") suffix that a
-    few names in the official list carry: ``"Brzezie k. Sulechowa"``.
-    """
-    name = re.sub(r"\s+k\.\s.*$", "", name.strip())
+
+def split_place_name(name):
+    """``"Bielsko-Biała"`` -> ``["bielsko", "biała"]``."""
+    name = strip_place_suffix(name)
     return [part for part in re.split(r"[\s-]+", name.lower()) if part]
 
 
@@ -275,21 +337,316 @@ def build_places(towns, places, common_words):
     them a town's top rank would only weaken passphrases. For other localities
     only the glued form is added — their parts are almost always ordinary
     words (``nowa``, ``wieś``, ``górna``).
+
+    Returns ``(ranks, sources)``; ``sources`` lists the original names (and
+    the added town words) with their ranks, for ``add_inflections``.
     """
     ranks = {}
+    sources = []
     ordered_towns = sorted(towns, key=lambda town: (-town[1], town[0]))
     for position, (name, _) in enumerate(ordered_towns, start=1):
         parts = split_place_name(name)
         add_word(ranks, "".join(parts), position)
+        sources.append((name, position))
         if len(parts) > 1:
             for part in parts:
                 if part not in common_words:
                     add_word(ranks, part, position)
+                    sources.append((part, position))
+    # The glued name -> the original spellings it comes from; the inflection
+    # needs the original (case marks the frozen tail of "Nowe Miasto nad
+    # Pilicą"), the smallest one is taken to stay deterministic.
+    spellings = defaultdict(set)
+    for name in places:
+        spellings["".join(split_place_name(name))].add(strip_place_suffix(name))
     counts = Counter("".join(split_place_name(name)) for name in places)
     ordered_places = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     for position, (word, _) in enumerate(ordered_places, start=len(towns) + 1):
         add_word(ranks, word, position)
-    return ranks
+        sources.append((min(spellings[word]), position))
+    return ranks, sources
+
+
+def read_sgjp():
+    """Return the pinned SGJP export, checksum- and edition-verified."""
+    payload = fetch(SGJP_URL)
+    sha256_checked(payload, SGJP_SHA256, SGJP_URL)
+    with gzip.open(io.BytesIO(payload), "rt", encoding="utf-8") as f:
+        header = f.readline().strip()
+    if header != f"#!DICT-ID {SGJP_DICT_ID}":
+        raise RuntimeError(f"unexpected SGJP edition: {header!r}")
+    return payload
+
+
+def sgjp_entries(payload):
+    """Yield ``(form, lemma, pos, fields, qualifiers)`` for every SGJP line.
+
+    ``fields`` are the tag fields after the part of speech (``subst:sg:
+    gen.acc:m1`` -> ``("sg", "gen.acc", "m1")``). The licence block at the
+    top of the file has no tabs, which is how it is skipped.
+    """
+    with gzip.open(io.BytesIO(payload), "rt", encoding="utf-8") as f:
+        for line in f:
+            columns = line.rstrip("\r\n").split("\t")
+            if len(columns) < 4 or line.startswith("#"):
+                continue
+            pos, *fields = columns[2].split(":")
+            yield columns[0], columns[1], pos, fields, columns[3]
+
+
+class Inflector:
+    """Inflected forms of names, from SGJP.
+
+    SGJP keeps one lexeme per proper name (``Wrocław``, ``Kowalski:Sm1``,
+    ``Katarzyna``) with all its forms; multi-word place names are stored word
+    by word (``Zielona`` and ``Góra`` are both geographic names, ``Sącz`` and
+    ``Wieś`` are "parts of geographic names", ``Nowy`` may only be an
+    adjective), so ``inflect`` declines every word of a name in the same
+    case and glues them: ``Zielona Góra`` -> ``zielonejgórze``.
+
+    Built in two passes over SGJP: the first finds the lexemes whose
+    nominative is one of ``words`` (lowercase), the second collects all their
+    forms. ``common_forms`` makes a third pass.
+    """
+
+    def __init__(self, payload, words):
+        self._payload = payload
+        # word -> [(kind, lemma, number, genders, qualifiers)], kind is
+        # "subst" or "adj"; from nominative forms only.
+        self._nominatives = defaultdict(list)
+        for form, lemma, pos, fields, qualifiers in sgjp_entries(payload):
+            entry = self._entry(pos, fields)
+            if entry is None or "nom" not in fields[1].split("."):
+                continue
+            word = form.lower()
+            if word not in words:
+                continue
+            kind, genders = entry
+            for number in fields[0].split("."):
+                self._nominatives[word].append(
+                    (kind, lemma, number, genders, frozenset(qualifiers.split("|")))
+                )
+        wanted = {
+            (kind, lemma) for c in self._nominatives.values() for kind, lemma, *_ in c
+        }
+        # (kind, lemma) -> {(number, case, gender): {forms}}
+        self._forms = defaultdict(lambda: defaultdict(set))
+        for form, lemma, pos, fields, _ in sgjp_entries(payload):
+            entry = self._entry(pos, fields)
+            if entry is None or (entry[0], lemma) not in wanted:
+                continue
+            kind, genders = entry
+            slots = self._forms[(kind, lemma)]
+            for number in fields[0].split("."):
+                for case in fields[1].split("."):
+                    for gender in genders:
+                        slots[(number, case, gender)].add(form.lower())
+
+    @staticmethod
+    def _entry(pos, fields):
+        """``(kind, genders)`` for nouns and adjectival words, else ``None``.
+
+        Deprecative forms (``depr``) and comparatives are left out.
+        """
+        if pos == "subst" and len(fields) >= 3:
+            return "subst", tuple(fields[2].split("."))
+        if SGJP_ADJECTIVES.get(pos) and len(fields) >= 4:
+            if fields[3] == SGJP_ADJECTIVES[pos]:
+                return "adj", tuple(fields[2].split("."))
+        return None
+
+    def _forms_of(self, kind, lemma, number, case, genders):
+        slots = self._forms[(kind, lemma)]
+        return {form for g in genders for form in slots.get((number, case, g), ())}
+
+    def _nouns(self, word, categories):
+        """Noun readings of ``word``, best tier only: geographic (or other
+        ``categories``) first, then other proper names, then common nouns."""
+        tiers = (
+            lambda q: q & categories,
+            lambda q: not q & COMMON_CATEGORIES,
+            lambda q: True,
+        )
+        nouns = [c for c in self._nominatives.get(word, ()) if c[0] == "subst"]
+        for tier in tiers:
+            found = [c for c in nouns if tier(c[4])]
+            if found:
+                return found
+        return []
+
+    def inflect_word(self, word, categories):
+        """All forms of the ``categories`` lexemes whose nominative is ``word``.
+
+        A singular nominative brings both numbers (``wrocławiu``,
+        ``wrocławiach``), a plural one (``Tychy``) only the plural.
+        """
+        forms = set()
+        for _, lemma, number, genders, qualifiers in self._nominatives.get(
+            word.lower(), ()
+        ):
+            if qualifiers & categories and len(word) >= MIN_LENGTH:
+                numbers = SGJP_NUMBERS if number == "sg" else (number,)
+                for n in numbers:
+                    for case in SGJP_CASES:
+                        forms |= self._forms_of("subst", lemma, n, case, genders)
+        return forms
+
+    def inflect(self, name, categories):
+        """Glued inflected forms of a (possibly multi-word) name.
+
+        Words from the first lowercase one on (``nad Pilicą``, ``pod
+        Ojcowem``) stay as they are. The head is the first ``categories``
+        noun that is not also an adjective (``Góra``, not ``Zielona``), the
+        name is only declined in the number of its head (``Tarnowskie Góry``
+        stays plural). Returns an empty set when any word has no reading in
+        SGJP.
+        """
+        words = [w for w in re.split(r"[\s-]+", name) if w]
+        if len(words) == 1:
+            return self.inflect_word(words[0], categories)
+        frozen = next((i for i, w in enumerate(words) if w[0].islower()), len(words))
+        tail = "".join(words[frozen:]).lower()
+        words = [w.lower() for w in words[:frozen]]
+        if not words:
+            return set()
+        nouns = [self._nouns(w, categories) for w in words]
+        adjectives = [
+            [c for c in self._nominatives.get(w, ()) if c[0] == "adj"] for w in words
+        ]
+
+        def head_rank(i):
+            proper = bool(nouns[i]) and bool(nouns[i][0][4] & categories)
+            if not nouns[i]:
+                return 4
+            return (0 if proper else 2) + bool(adjectives[i])
+
+        head = min(range(len(words)), key=lambda i: (head_rank(i), i))
+        if not nouns[head]:
+            return set()
+        number = "sg" if any(c[2] == "sg" for c in nouns[head]) else nouns[head][0][2]
+
+        def declension(i, head_genders):
+            """``[(kind, lemma, number, genders)]`` readings of word ``i``.
+
+            The other words decline as ``categories`` nouns (``Bielsko-Biała``,
+            ``Kobyla Wola``) or as adjectives agreeing with the head; a word
+            that is both declines as the adjective when the noun declines
+            like one anyway (``Nowe Miasto`` -> ``Nowym Mieście``, not the
+            town ``Nowe`` -> ``Nowem``), else as the noun (``Wola`` ->
+            ``Woli``, not the adjective ``woli`` -> ``wolej``). Other nouns
+            are used for words that are not adjectives (``Miasto``) but not
+            for adjectives that do not agree (``Nowy`` with the feminine
+            ``Ostrów``). Always in the number of the head, except proper
+            nouns that only have the other one (``Czerwionka-Leszczyny``,
+            ``Duszniki-Zdrój``).
+            """
+            in_number = [c for c in nouns[i] if c[2] == number]
+            proper = bool(nouns[i]) and bool(nouns[i][0][4] & categories)
+            agreeing = [
+                ("adj", c[1], number, set(c[3]) & head_genders)
+                for c in adjectives[i]
+                if c[2] == number and set(c[3]) & head_genders
+            ]
+            as_nouns = [("subst", c[1], number, c[3]) for c in in_number]
+            if agreeing and as_nouns and proper:
+                genitives = [
+                    {f for r in rs for f in self._forms_of(*r[:2], number, "gen", r[3])}
+                    for rs in (agreeing, as_nouns)
+                ]
+                return agreeing if genitives[0] & genitives[1] else as_nouns
+            if agreeing:
+                return agreeing
+            if in_number and (proper or not adjectives[i]):
+                return as_nouns
+            if proper:
+                return [("subst", c[1], c[2], c[3]) for c in nouns[i]]
+            return []
+
+        forms = set()
+        # Each lexeme of the head separately, so that the adjectives agree
+        # with it (``Ostrów`` is both masculine and feminine in SGJP).
+        for _, lemma, _, genders, _ in sorted(c for c in nouns[head] if c[2] == number):
+            readings = [
+                [("subst", lemma, number, genders)]
+                if i == head
+                else declension(i, set(genders))
+                for i in range(len(words))
+            ]
+            if not all(readings):
+                continue
+            for case in SGJP_CASES:
+                options = [
+                    sorted(
+                        set().union(
+                            *(self._forms_of(k, x, n, case, g) for k, x, n, g in r)
+                        )
+                    )
+                    for r in readings
+                ]
+                for parts in itertools.product(*options):
+                    forms.add("".join(parts) + tail)
+        return forms
+
+    def common_forms(self, forms):
+        """The subset of ``forms`` (lowercase) that are also forms of ordinary
+        words in SGJP (``górach`` from ``góra``, ``róże`` from ``róża``)."""
+        found = set()
+        for form, _, _, _, qualifiers in sgjp_entries(self._payload):
+            word = form.lower()
+            if word in forms and set(qualifiers.split("|")) & COMMON_CATEGORIES:
+                found.add(word)
+        return found
+
+
+def inflect_sources(inflector, sources, categories):
+    """``{form: rank}`` of the inflected forms of ``sources``; a form shared
+    by several names keeps the lowest rank. Also returns the (lowercase)
+    names that got at least one form."""
+    inflected = {}
+    covered = set()
+    for name, rank in sources:
+        forms = inflector.inflect(name, categories)
+        forms = {f for f in forms if len(f) >= MIN_LENGTH and f.isalpha()}
+        if forms:
+            covered.add(name.lower())
+        for form in forms:
+            if rank < inflected.get(form, rank + 1):
+                inflected[form] = rank
+    return inflected, covered
+
+
+def add_inflections(ranks, inflected, common_words, common_forms):
+    """Add inflected forms (and their diacritics-free variants) to ``ranks``.
+
+    Existing entries keep their rank — the base forms do not change. A form
+    that is also a frequent ordinary word (one of the ``COMMON_WORD_RANK_LIMIT``
+    most frequent in ``pl_common_words`` and, per SGJP, a form of a common
+    word: ``górze``, ``kota``, ``mają``) is left to ``pl_common_words``, which
+    ranks it by real frequency; giving it a town's or a name's top rank would
+    only weaken passphrases.
+
+    Returns ``(added, existing, common)``: the number of new entries and of
+    the (form or variant) entries skipped for each reason.
+    """
+    new = {}
+    existing, common = set(), set()
+    for form, rank in sorted(inflected.items()):
+        rank *= INFLECTED_RANK_FACTOR
+        for variant in (form, strip_diacritics(form)):
+            if variant in ranks:
+                existing.add(variant)
+                continue
+            if (
+                common_words.get(variant, COMMON_WORD_RANK_LIMIT + 1)
+                <= COMMON_WORD_RANK_LIMIT
+                and form in common_forms
+            ):
+                common.add(variant)
+                continue
+            if rank < new.get(variant, rank + 1):
+                new[variant] = rank
+    ranks.update(new)
+    return len(new), len(existing), len(common)
 
 
 def save(dictionary, ranks):
@@ -312,13 +669,48 @@ def main():
     lists = read_lists(download())
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     built = {}
-    for dictionary, sources in DICTIONARIES.items():
-        built[dictionary] = build_ranks(lists[source] for source in sources)
-        save(dictionary, built[dictionary])
-    places = build_places(
+    sources = {}
+    for dictionary, upstream in DICTIONARIES.items():
+        built[dictionary], sources[dictionary] = build_ranks(
+            lists[source] for source in upstream
+        )
+    built["pl_places"], sources["pl_places"] = build_places(
         read_town_population(), read_places(), built["pl_common_words"]
     )
-    save("pl_places", places)
+    words = {
+        word
+        for dictionary in INFLECTED_CATEGORIES
+        for name, _ in sources[dictionary]
+        for word in re.split(r"[\s-]+", name.lower())
+    }
+    inflector = Inflector(read_sgjp(), words)
+    inflected = {}
+    for dictionary, categories in INFLECTED_CATEGORIES.items():
+        inflected[dictionary], covered = inflect_sources(
+            inflector, sources[dictionary], categories
+        )
+        names = {name.lower() for name, _ in sources[dictionary]}
+        multi = {name for name in names if re.search(r"[\s-]", name)}
+        print(
+            f"{dictionary}: {len(covered)}/{len(names)} names inflected "
+            f"(multi-word: {len(covered & multi)}/{len(multi)})"
+        )
+    common_forms = inflector.common_forms(
+        {form for forms in inflected.values() for form in forms}
+    )
+    for dictionary in INFLECTED_CATEGORIES:
+        added, existing, common = add_inflections(
+            built[dictionary],
+            inflected[dictionary],
+            built["pl_common_words"],
+            common_forms,
+        )
+        print(
+            f"{dictionary}: {added} inflected entries added, skipped "
+            f"{existing} already present and {common} common words"
+        )
+    for dictionary, ranks in built.items():
+        save(dictionary, ranks)
 
 
 if __name__ == "__main__":

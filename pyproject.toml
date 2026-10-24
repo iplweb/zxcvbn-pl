@@ -1,7 +1,7 @@
 [project]
 name = "zxcvbn-pl"
-version = "0.2.0"
-description = "Polish dictionaries (common words, first and last names, place names) for zxcvbn password strength estimation."
+version = "0.3.0"
+description = "Polish dictionaries (common words, first and last names, place names, with inflected forms) for zxcvbn password strength estimation."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -46,7 +46,7 @@ build-backend = "hatchling.build"
 packages = ["src/zxcvbn_pl"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "tests", "scripts", "README.md", "LICENSE", "NOTICE.md", "CHANGELOG.md"]
+only-include = ["src", "tests", "scripts", "README.md", "LICENSE", "LICENSE.sgjp", "NOTICE.md", "CHANGELOG.md"]
 
 [tool.ruff]
 line-length = 88
