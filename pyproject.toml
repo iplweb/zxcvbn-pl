@@ -1,7 +1,7 @@
 [project]
 name = "zxcvbn-pl"
-version = "0.1.0"
-description = "Polish dictionaries (common words, first and last names) for zxcvbn password strength estimation."
+version = "0.2.0"
+description = "Polish dictionaries (common words, first and last names, place names) for zxcvbn password strength estimation."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

@@ -5,10 +5,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Polskie słowniki dla [zxcvbn](https://github.com/dwolfhub/zxcvbn-python)
-(port w Pythonie) — pospolite słowa, imiona i nazwiska.
+(port w Pythonie) — pospolite słowa, imiona, nazwiska i nazwy miejscowości.
 
 *Polish dictionaries for the Python port of zxcvbn — common words, first
-names and last names. [English below.](#english)*
+names, last names and place names. [English below.](#english)*
 
 ---
 
@@ -29,16 +29,21 @@ słów, dostają najwyższą ocenę:
 | `Katarzyna1985!` | 3 | 2 |
 | `agnieszka.nowak1` | 4 | 3 |
 | `Wojciechowski77` | 2 | 1 |
+| `Warszawa2024!` | 3 | 2 |
+| `Poznań2023!` | 4 | 2 |
+| `ZielonaGora2020` | 4 | 1 |
+| `Częstochowa77` | 4 | 1 |
 | `ptaszek-na-drzewie` | 4 | 4 |
 | `zielonaherbatazcytryna` | 4 | 4 |
 
 Frazy z kilku słów nadal są oceniane wysoko — tak jak zaleca NIST
-SP 800-63B. Spada ocena haseł z jednego pospolitego słowa, imienia lub
-nazwiska z dopiskiem. Efekt jest umiarkowany: słowa spoza ok. 50 tys.
+SP 800-63B. Spada ocena haseł z jednego pospolitego słowa, imienia,
+nazwiska lub nazwy miejscowości z dopiskiem. Efekt jest umiarkowany: słowa spoza ok. 50 tys.
 najczęstszych (np. `kaczuszka2000!!`) nadal są dla zxcvbn losowymi literami.
 
 Port zxcvbn w JavaScripcie (zxcvbn-ts) ma pakiety językowe; port w Pythonie
-— nie. Ten pakiet wypełnia tę lukę danymi z `@zxcvbn-ts/language-pl`.
+— nie. Ten pakiet wypełnia tę lukę danymi z `@zxcvbn-ts/language-pl`
+i dokłada nazwy miejscowości z urzędowego wykazu (TERYT).
 
 ### Instalacja i użycie
 
@@ -58,7 +63,7 @@ wynik["score"]  # 2
 # ['pl_common_words', 'passwords']
 ```
 
-`register()` dokłada trzy słowniki do globalnego rejestru zxcvbn
+`register()` dokłada cztery słowniki do globalnego rejestru zxcvbn
 (`zxcvbn.matching.RANKED_DICTIONARIES`), więc działa dla każdego kolejnego
 wywołania `zxcvbn()` w procesie:
 
@@ -67,12 +72,17 @@ wywołania `zxcvbn()` w procesie:
 | `pl_common_words` | ok. 52 tys. najczęstszych słów (napisy filmowe) |
 | `pl_first_names` | imiona z rejestru PESEL (≥ 200 osób) |
 | `pl_last_names` | nazwiska z rejestru PESEL (≥ 200 osób) |
+| `pl_places` | nazwy miejscowości z urzędowego wykazu: najpierw miasta wg liczby ludności, potem pozostałe wg liczby miejscowości o tej nazwie |
+
+Nazwy wieloczłonowe są sklejone (`Zielona Góra` → `zielonagora`); człony
+nazw miast, które nie są pospolitymi słowami, są też osobno (`bielsko`,
+`gorzow`).
 
 Każde słowo z polskimi znakami jest też w wariancie bez nich (`żółw` →
 `zolw`) z tą samą pozycją. Pomijane są wpisy krótsze niż 3 znaki.
 
 Słowniki to indeksy [marisa-trie](https://github.com/pytries/marisa-trie)
-czytane przez mmap (~1 MB na dysku, znikomy narzut RAM).
+czytane przez mmap (~1,2 MB na dysku, znikomy narzut RAM).
 
 ### Uwaga o wątkach
 
@@ -87,9 +97,14 @@ Kod: MIT. Dane pochodzą z `@zxcvbn-ts/language-pl` i mają własne licencje —
 szczegóły w [NOTICE.md](NOTICE.md):
 
 - pospolite słowa: OPUS OpenSubtitles 2024 — **ODC-BY** (wymaga podania źródła),
-- imiona i nazwiska: rejestr PESEL, dane.gov.pl — **CC0 1.0**.
+- imiona i nazwiska: rejestr PESEL, dane.gov.pl — **CC0 1.0**,
+- nazwy miejscowości: Wykaz urzędowych nazw miejscowości i ich części
+  (MSWiA, stan na 1.01.2019), dane.gov.pl — **CC0 1.0**; kolejność miast:
+  liczba ludności wg GUS, Bank Danych Lokalnych (stan na 31.12.2025) —
+  **CC BY 4.0**.
 
-Odbudowa słowników (deterministyczna, z weryfikacją sha512 paczki npm):
+Odbudowa słowników (deterministyczna, z weryfikacją sum kontrolnych
+pobieranych danych):
 
 ```bash
 uv run python scripts/build_dictionaries.py
@@ -101,8 +116,9 @@ uv run python scripts/build_dictionaries.py
 
 zxcvbn ships with English dictionaries only, so Polish words look like random
 letters to it and passwords such as `słoneczko123456` or `Katarzyna1985!`
-get the top score. `zxcvbn-pl` adds Polish common words, first names and last
-names (plus diacritics-free variants) to the Python port of zxcvbn:
+get the top score. `zxcvbn-pl` adds Polish common words, first names, last
+names and place names (plus diacritics-free variants) to the Python port of
+zxcvbn:
 
 ```python
 import zxcvbn_pl
@@ -112,12 +128,29 @@ zxcvbn_pl.register()
 zxcvbn("słoneczko123456")["score"]  # 2 instead of 4
 ```
 
-`register()` is idempotent and adds three dictionaries (`pl_common_words`,
-`pl_first_names`, `pl_last_names`) to zxcvbn's global
+`register()` is idempotent and adds four dictionaries (`pl_common_words`,
+`pl_first_names`, `pl_last_names`, `pl_places`) to zxcvbn's global
 `zxcvbn.matching.RANKED_DICTIONARIES`. Multi-word passphrases still score
 high, in line with NIST SP 800-63B.
 
-The data comes from the `@zxcvbn-ts/language-pl` npm package: common words
-from OPUS OpenSubtitles 2024 (ODC-BY), first and last names from the Polish
-PESEL registry published on dane.gov.pl (CC0 1.0). See [NOTICE.md](NOTICE.md).
+| Password | zxcvbn | zxcvbn + zxcvbn-pl |
+|---|---|---|
+| `słoneczko123456` | 4 | 2 |
+| `Katarzyna1985!` | 3 | 2 |
+| `Warszawa2024!` | 3 | 2 |
+| `Poznań2023!` | 4 | 2 |
+| `ZielonaGora2020` | 4 | 1 |
+| `zielonaherbatazcytryna` | 4 | 4 |
+
+`pl_places` holds the names of Polish localities from the official list of
+place names (towns first, by population; then the other names by how many
+localities share them). Multi-word names are glued (`zielonagora`).
+
+Common words, first and last names come from the `@zxcvbn-ts/language-pl`
+npm package: common words from OPUS OpenSubtitles 2024 (ODC-BY), first and
+last names from the Polish PESEL registry published on dane.gov.pl (CC0 1.0).
+Place names come from the official list of Polish place names (Ministry of
+the Interior and Administration, state as of 1 Jan 2019, dane.gov.pl,
+CC0 1.0), towns are ordered by population from Statistics Poland's Local Data
+Bank (31 Dec 2025, CC BY 4.0). See [NOTICE.md](NOTICE.md).
 The code is MIT-licensed.

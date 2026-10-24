@@ -3,7 +3,8 @@
 zxcvbn ships English dictionaries only, so to zxcvbn a Polish word looks like
 random letters and passwords such as ``słoneczko123456`` or
 ``Katarzyna1985!`` get the top score. This package adds Polish common words,
-first names and last names (with diacritics-free variants) to zxcvbn::
+first names, last names and place names (with diacritics-free variants) to
+zxcvbn::
 
     import zxcvbn_pl
     from zxcvbn import zxcvbn
@@ -20,13 +21,18 @@ from pathlib import Path
 import marisa_trie
 
 __all__ = ["DICTIONARY_NAMES", "MarisaRankedDictionary", "dictionaries", "register"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 DATA_DIR = Path(__file__).parent / "data"
 
 #: Names under which the dictionaries are registered in zxcvbn — they show up
 #: as ``dictionary_name`` in zxcvbn's match sequence.
-DICTIONARY_NAMES = ("pl_common_words", "pl_first_names", "pl_last_names")
+DICTIONARY_NAMES = (
+    "pl_common_words",
+    "pl_first_names",
+    "pl_last_names",
+    "pl_places",
+)
 
 _lock = threading.Lock()
 _dictionaries = None
